@@ -1,0 +1,1329 @@
+-- ======================================================
+-- IMHUB V4 — Psilent aprimorado (toggle numérico 1..600)
+-- Autor: Ajuste focado no Psilent — caixa editável para strength (1-600)
+-- Notas:
+--  • Psilent agora tem uma força configurável (psilentStrength) controlada via UI MAIN.
+--  • ApplyPSilent usa esse valor para interpolar (lerp) a orientação do HumanoidRootPart
+--    em direção ao alvo sem mover a câmera do jogador.
+--  • Comentários explicativos adicionados.
+-- ======================================================
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local Camera = workspace and workspace.CurrentCamera
+local lp = Players.LocalPlayer
+
+-- Ensure LocalPlayer/Camera present
+if not lp then Players:GetPropertyChangedSignal("LocalPlayer"):Wait(); lp = Players.LocalPlayer end
+if not Camera then Camera = workspace:WaitForChild("CurrentCamera", 5) end
+
+-- Colors
+local DARK_RED = Color3.fromRGB(139, 0, 0)
+local LIGHT_RED = Color3.fromRGB(255, 110, 110)
+local WHITE = Color3.fromRGB(255,255,255)
+
+-- -------------------------
+-- Persistence
+-- -------------------------
+local storageFile = "imhub_v4_binds.json"
+local canWrite, canRead = false, false
+local writeFunc, readFunc = writefile, readfile
+
+if type(writefile) == "function" and type(readfile) == "function" then
+    writeFunc, readFunc = writefile, readfile
+    canWrite, canRead = true, true
+elseif type(syn) == "table" and type(syn.write_file) == "function" then
+    writeFunc, readFunc = syn.write_file, syn.read_file
+    canWrite, canRead = true, true
+else
+    canWrite, canRead = false, false
+end
+
+local function persistWrite(tbl)
+    if canWrite then
+        pcall(function() writeFunc(storageFile, HttpService:JSONEncode(tbl)) end)
+    else
+        _G.IMHUB_V4_BINDS = tbl
+    end
+end
+
+local function persistRead()
+    if canRead then
+        local ok, data = pcall(function() return readFunc(storageFile) end)
+        if ok and data then
+            local suc, tbl = pcall(function() return HttpService:JSONDecode(data) end)
+            if suc and type(tbl) == "table" then return tbl end
+        end
+        return nil
+    else
+        return _G.IMHUB_V4_BINDS
+    end
+end
+
+-- -------------------------
+-- Defaults & state
+-- -------------------------
+local DEFAULTS = {
+    speedEnabled = false,
+    speedValue = 16,
+    jumpValue = 150,
+    noclipEnabled = false,
+    aimbotEnabled = false,
+    teamCheck = true,
+    aimFOVEnabled = false,
+    AimFOV = 120, -- pixels radius
+    Smoothing = 2, -- 1..6 recommended
+    espEnabled = false,
+    camLockActive = false,
+    noRecoilEnabled = true,
+
+    -- new features
+    silentAim = false,
+    psilent = false,
+    psilentStrength = 60, -- 1..600 user editable
+    priority = "Head", -- Head or Body
+    humanizer = false,
+    humanizerStrength = 0.6, -- pixels jitter
+    autoSwitch = false,
+    rageBoost = false,
+    legitAssist = true,
+
+    -- new wall-check esp
+    espWallCheckEnabled = false,
+}
+
+local state = {
+    speedEnabled = DEFAULTS.speedEnabled,
+    speedValue   = DEFAULTS.speedValue,
+    jumpValue    = DEFAULTS.jumpValue,
+    noclipEnabled= DEFAULTS.noclipEnabled,
+    aimbotEnabled= DEFAULTS.aimbotEnabled,
+    teamCheck    = DEFAULTS.teamCheck,
+    aimFOVEnabled= DEFAULTS.aimFOVEnabled,
+    AimFOV       = DEFAULTS.AimFOV,
+    Smoothing    = DEFAULTS.Smoothing,
+    espEnabled   = DEFAULTS.espEnabled,
+    camLockActive= DEFAULTS.camLockActive,
+    noRecoilEnabled = DEFAULTS.noRecoilEnabled,
+
+    -- new
+    silentAim = DEFAULTS.silentAim,
+    psilent = DEFAULTS.psilent,
+    psilentStrength = DEFAULTS.psilentStrength,
+    priority = DEFAULTS.priority,
+    humanizer = DEFAULTS.humanizer,
+    humanizerStrength = DEFAULTS.humanizerStrength,
+    autoSwitch = DEFAULTS.autoSwitch,
+    rageBoost = DEFAULTS.rageBoost,
+    legitAssist = DEFAULTS.legitAssist,
+
+    espWallCheckEnabled = DEFAULTS.espWallCheckEnabled,
+}
+
+-- -------------------------
+-- Binds
+-- -------------------------
+local binds = persistRead() or {
+    { action = "Aimbot", key = "MouseButton2", mode = "Hold" },
+    { action = "CameraLock", key = "", mode = "Hold" },
+    { action = "Jump", key = "KeyCode.Space", mode = "Hold" },
+    { action = "Speed", key = "", mode = "Hold" },
+    { action = "Noclip", key = "", mode = "Toggle" },
+    { action = "ESP", key = "", mode = "Toggle" },
+}
+persistWrite(binds)
+local function saveBinds() persistWrite(binds) end
+
+-- -------------------------
+-- Input helpers
+-- -------------------------
+local function inputToString(input)
+    if not input then return "" end
+    if input.UserInputType then
+        local ut = input.UserInputType
+        if ut == Enum.UserInputType.MouseButton1 then return "MouseButton1" end
+        if ut == Enum.UserInputType.MouseButton2 then return "MouseButton2" end
+        if ut == Enum.UserInputType.MouseButton3 then return "MouseButton3" end
+    end
+    if input.KeyCode and input.KeyCode ~= Enum.KeyCode.Unknown then
+        return "KeyCode." .. tostring(input.KeyCode):gsub("Enum.KeyCode.", "")
+    end
+    return ""
+end
+
+-- -------------------------
+-- UI setup (kept minimal changes)
+-- -------------------------
+if CoreGui:FindFirstChild("IMHUB_V4") then CoreGui.IMHUB_V4:Destroy() end
+local ui = Instance.new("ScreenGui", CoreGui)
+ui.Name = "IMHUB_V4"
+ui.ResetOnSpawn = false
+ui.IgnoreGuiInset = true
+
+local mainFrame = Instance.new("Frame", ui)
+mainFrame.Size = UDim2.new(0, 480, 0, 560)
+mainFrame.Position = UDim2.new(0.5, -240, 0.28, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(18,18,18)
+mainFrame.Active = true
+mainFrame.Draggable = true
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
+Instance.new("UIStroke", mainFrame).Color = Color3.fromRGB(60,60,60)
+
+local header = Instance.new("TextLabel", mainFrame)
+header.Size = UDim2.new(1,0,0,46)
+header.Position = UDim2.new(0,0,0,0)
+header.BackgroundColor3 = Color3.fromRGB(28,28,28)
+header.Text = "IMHUB V4 — Marcell Edition (Psilent ajustável)"
+header.TextColor3 = Color3.fromRGB(220,220,220)
+header.Font = Enum.Font.GothamBold
+header.TextSize = 18
+
+local floatBtn = Instance.new("TextButton", ui)
+floatBtn.Size = UDim2.new(0,70,0,70)
+floatBtn.Position = UDim2.new(0.5, -35, 0.88, 0)
+floatBtn.Text = "Menu"
+floatBtn.Font = Enum.Font.GothamBold
+floatBtn.TextSize = 14
+floatBtn.BackgroundColor3 = Color3.fromRGB(30,30,30)
+floatBtn.TextColor3 = Color3.fromRGB(220,220,220)
+floatBtn.Active = true
+floatBtn.Draggable = true
+Instance.new("UICorner", floatBtn).CornerRadius = UDim.new(1,0)
+Instance.new("UIStroke", floatBtn).Color = Color3.fromRGB(50,50,50)
+mainFrame.Visible = false
+floatBtn.MouseButton1Click:Connect(function() mainFrame.Visible = not mainFrame.Visible end)
+
+-- Tabs & pages
+local tabBar = Instance.new("Frame", mainFrame)
+tabBar.Size = UDim2.new(1,0,0,40)
+tabBar.Position = UDim2.new(0,0,0,46)
+tabBar.BackgroundTransparency = 1
+
+local function createTab(name, posX)
+    local b = Instance.new("TextButton", tabBar)
+    b.Size = UDim2.new(0, 150, 1, 0)
+    b.Position = UDim2.new(posX, 0, 0, 0)
+    b.Text = name
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 14
+    b.BackgroundColor3 = Color3.fromRGB(30,30,30)
+    b.TextColor3 = Color3.fromRGB(220,220,220)
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,6)
+    return b
+end
+
+local tabMainBtn = createTab("MAIN", 0.02)
+local tabESPBtn  = createTab("ESP", 0.35)
+local tabBindBtn = createTab("BIND", 0.68)
+
+local function makePage()
+    local p = Instance.new("ScrollingFrame", mainFrame)
+    p.Size = UDim2.new(1, -16, 1, -124)
+    p.Position = UDim2.new(0, 8, 0, 96)
+    p.BackgroundTransparency = 1
+    p.ScrollBarThickness = 6
+    p.CanvasSize = UDim2.new(0,0,0,1400)
+    return p
+end
+
+local pageMain = makePage()
+local pageESP = makePage()
+local pageBind = makePage()
+local function showPage(p)
+    pageMain.Visible = (p == pageMain)
+    pageESP.Visible = (p == pageESP)
+    pageBind.Visible = (p == pageBind)
+end
+showPage(pageMain)
+tabMainBtn.MouseButton1Click:Connect(function() showPage(pageMain) end)
+tabESPBtn.MouseButton1Click:Connect(function() showPage(pageESP) end)
+tabBindBtn.MouseButton1Click:Connect(function() showPage(pageBind) end)
+
+-- helpers for UI building
+local curY_main, curY_esp, curY_bind = 12, 12, 12
+
+local function makeToggle(parent, text, default, onChange)
+    local b = Instance.new("TextButton", parent)
+    b.Position = UDim2.new(0, 12, 0, (parent == pageMain and curY_main) or (parent == pageESP and curY_esp) or curY_bind)
+    b.Size = UDim2.new(0, 436, 0, 36)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 15
+    b.TextColor3 = Color3.fromRGB(220,220,220)
+    b.BackgroundColor3 = default and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40)
+    b.Text = text .. ": " .. (default and "ON" or "OFF")
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
+
+    local function toggle()
+        default = not default
+        b.BackgroundColor3 = default and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40)
+        b.Text = text .. ": " .. (default and "ON" or "OFF")
+        if onChange then pcall(onChange, default) end
+    end
+
+    b.MouseButton1Click:Connect(toggle)
+    if parent == pageMain then curY_main = curY_main + 46
+    elseif parent == pageESP then curY_esp = curY_esp + 46
+    else curY_bind = curY_bind + 46 end
+    return b
+end
+
+local function makeBox(parent, labelText, default, wide, onChange)
+    local y = (parent == pageMain and curY_main) or (parent == pageESP and curY_esp) or curY_bind
+    local lbl = Instance.new("TextLabel", parent)
+    lbl.Position = UDim2.new(0,12,0,y)
+    lbl.Size = UDim2.new(0,220,0,18)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 14
+    lbl.TextColor3 = Color3.fromRGB(220,220,220)
+
+    local box = Instance.new("TextBox", parent)
+    box.Position = UDim2.new(0,12,0,y+20)
+    box.Size = UDim2.new(0, (wide and 280) or 160, 0, 34)
+    box.Text = tostring(default)
+    box.Font = Enum.Font.GothamBold
+    box.TextSize = 15
+    box.BackgroundColor3 = Color3.fromRGB(36,36,36)
+    box.TextColor3 = Color3.fromRGB(230,230,230)
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0,6)
+
+    box.FocusLost:Connect(function(enterPressed)
+        local v = tonumber(box.Text)
+        if v and onChange then
+            pcall(function() onChange(v) end)
+        else
+            box.Text = tostring(default)
+        end
+    end)
+
+    if parent == pageMain then curY_main = curY_main + 60
+    elseif parent == pageESP then curY_esp = curY_esp + 60
+    else curY_bind = curY_bind + 60 end
+    return box, lbl
+end
+
+-- -------------------------
+-- MAIN content: core toggles + new options
+-- -------------------------
+local speedToggle = makeToggle(pageMain, "Speed", state.speedEnabled, function(v) state.speedEnabled = v end)
+local speedBox = makeBox(pageMain, "Speed Value", state.speedValue, false, function(v) state.speedValue = math.max(1, math.floor(v)); speedBox.Text = tostring(state.speedValue) end)
+
+local jumpActive = false
+local jumpToggle = makeToggle(pageMain, "Jump Hack", jumpActive, function(v) jumpActive = v end)
+local jumpBox = makeBox(pageMain, "Jump Power", state.jumpValue, false, function(v) state.jumpValue = math.max(0, v); jumpBox.Text = tostring(state.jumpValue) end)
+
+local noclipToggle = makeToggle(pageMain, "Noclip", state.noclipEnabled, function(v) state.noclipEnabled = v end)
+local noRecoilToggle = makeToggle(pageMain, "NO-RECOIL", state.noRecoilEnabled, function(v) state.noRecoilEnabled = v end)
+
+local aimToggle = makeToggle(pageMain, "Aimbot", state.aimbotEnabled, function(v) state.aimbotEnabled = v end)
+local teamToggle = makeToggle(pageMain, "TeamCheck", state.teamCheck, function(v) state.teamCheck = v end)
+local camLockToggle = makeToggle(pageMain, "CameraLock", state.camLockActive, function(v) state.camLockActive = v end)
+local aimFovToggle = makeToggle(pageMain, "AimFOV", state.aimFOVEnabled, function(v) state.aimFOVEnabled = v end)
+local aimFovBox = makeBox(pageMain, "AimFOV (pixels)", state.AimFOV, false, function(v) state.AimFOV = math.clamp(math.floor(v), 8, 2000); aimFovBox.Text = tostring(state.AimFOV) end)
+
+local smoothBox = makeBox(pageMain, "Smoothing (1-6)", state.Smoothing, false, function(v) state.Smoothing = math.clamp(tonumber(v) or 1, 1, 6); smoothBox.Text = tostring(state.Smoothing) end)
+
+-- New advanced toggles
+local silentToggle = makeToggle(pageMain, "Silent Aim", state.silentAim, function(v) state.silentAim = v end)
+local psilentToggle = makeToggle(pageMain, "Psilent Mode", state.psilent, function(v) state.psilent = v end)
+local psilentBox = makeBox(pageMain, "Psilent Strength (1-600)", state.psilentStrength, false, function(v)
+    v = math.clamp(math.floor(tonumber(v) or 60), 1, 600)
+    state.psilentStrength = v
+    psilentBox.Text = tostring(state.psilentStrength)
+end)
+
+-- Priority toggle: more explicit UI & debounce
+local priorityDebounce = false
+local function setPriorityToggleVisual(btn)
+    if not btn then return end
+    btn.BackgroundColor3 = (state.priority == "Head") and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40)
+    btn.Text = "Priority: " .. tostring(state.priority) .. " (Click to toggle)"
+end
+local priorityToggleBtn = Instance.new("TextButton", pageMain)
+priorityToggleBtn.Position = UDim2.new(0, 12, 0, curY_main)
+priorityToggleBtn.Size = UDim2.new(0, 436, 0, 36)
+priorityToggleBtn.Font = Enum.Font.GothamBold
+priorityToggleBtn.TextSize = 15
+priorityToggleBtn.TextColor3 = Color3.fromRGB(220,220,220)
+Instance.new("UICorner", priorityToggleBtn).CornerRadius = UDim.new(0,8)
+priorityToggleBtn.MouseButton1Click:Connect(function()
+    if priorityDebounce then return end
+    priorityDebounce = true
+    if state.priority == "Head" then state.priority = "Body" else state.priority = "Head" end
+    setPriorityToggleVisual(priorityToggleBtn)
+    task.delay(0.18, function() priorityDebounce = false end)
+end)
+setPriorityToggleVisual(priorityToggleBtn)
+curY_main = curY_main + 46
+
+local humanizerToggle = makeToggle(pageMain, "Humanizer", state.humanizer, function(v) state.humanizer = v end)
+local humanizerBox = makeBox(pageMain, "Humanizer Strength (pixels)", state.humanizerStrength, false, function(v) state.humanizerStrength = math.clamp(tonumber(v) or 0.6, 0, 6); humanizerBox.Text = tostring(state.humanizerStrength) end)
+
+local autoSwitchToggle = makeToggle(pageMain, "Auto Target Switch", state.autoSwitch, function(v) state.autoSwitch = v end)
+local rageBoostToggle = makeToggle(pageMain, "Rage Boost", state.rageBoost, function(v) state.rageBoost = v end)
+local legitAssistToggle = makeToggle(pageMain, "Legit Assist", state.legitAssist, function(v) state.legitAssist = v end)
+
+-- -------------------------
+-- ESP page basics (simplified)
+-- -------------------------
+local espToggle = makeToggle(pageESP, "ESP", state.espEnabled, function(v) state.espEnabled = v end)
+
+-- NEW: ESP WALL CHECK toggle (independent)
+local espWallToggle = makeToggle(pageESP, "ESP WALL CHECK", state.espWallCheckEnabled, function(v) state.espWallCheckEnabled = v end)
+
+local nearbyLabel = Instance.new("TextLabel", pageESP)
+nearbyLabel.Position = UDim2.new(0,12,0,curY_esp)
+nearbyLabel.Size = UDim2.new(0,436,0,28)
+nearbyLabel.BackgroundColor3 = Color3.fromRGB(26,26,26)
+nearbyLabel.Text = "Nearby players: 0"
+nearbyLabel.Font = Enum.Font.GothamBold
+nearbyLabel.TextSize = 14
+nearbyLabel.TextColor3 = Color3.fromRGB(220,220,220)
+Instance.new("UICorner", nearbyLabel).CornerRadius = UDim.new(0,6)
+curY_esp = curY_esp + 44
+
+-- -------------------------
+-- Binds UI (kept same)
+-- -------------------------
+local bindHeader = Instance.new("TextLabel", pageBind)
+bindHeader.Position = UDim2.new(0,12,0,curY_bind)
+bindHeader.Size = UDim2.new(0,436,0,30)
+bindHeader.BackgroundTransparency = 1
+bindHeader.Text = "Binds: edite a tecla (pode deixar vazio) e escolha Hold/Toggle. Clique Save."
+bindHeader.Font = Enum.Font.GothamBold
+bindHeader.TextSize = 13
+bindHeader.TextColor3 = Color3.fromRGB(220,220,220)
+curY_bind = curY_bind + 38
+
+local bindUI = {}
+local function refreshBindUI()
+    for _,v in pairs(bindUI) do if v.frame and v.frame.Parent then v.frame:Destroy() end end
+    bindUI = {}
+    local y = curY_bind
+    for i,b in ipairs(binds) do
+        local f = Instance.new("Frame", pageBind)
+        f.Position = UDim2.new(0,12,0,y)
+        f.Size = UDim2.new(0,436,0,56)
+        f.BackgroundColor3 = Color3.fromRGB(30,30,30)
+        Instance.new("UICorner", f).CornerRadius = UDim.new(0,6)
+
+        local actionLbl = Instance.new("TextLabel", f)
+        actionLbl.Position = UDim2.new(0,8,0,6)
+        actionLbl.Size = UDim2.new(0,220,0,18)
+        actionLbl.BackgroundTransparency = 1
+        actionLbl.Text = b.action
+        actionLbl.Font = Enum.Font.GothamBold
+        actionLbl.TextSize = 14
+        actionLbl.TextColor3 = Color3.fromRGB(220,220,220)
+
+        local keyBox = Instance.new("TextBox", f)
+        keyBox.Position = UDim2.new(0,8,0,28)
+        keyBox.Size = UDim2.new(0,220,0,20)
+        keyBox.Text = b.key or ""
+        keyBox.Font = Enum.Font.GothamBold
+        keyBox.TextSize = 14
+        keyBox.BackgroundColor3 = Color3.fromRGB(36,36,36)
+        keyBox.TextColor3 = Color3.fromRGB(220,220,220)
+
+        local modeBtn = Instance.new("TextButton", f)
+        modeBtn.Position = UDim2.new(0,236,0,6)
+        modeBtn.Size = UDim2.new(0,80,0,28)
+        modeBtn.Text = b.mode
+        modeBtn.Font = Enum.Font.GothamBold
+        modeBtn.TextSize = 14
+        modeBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
+        modeBtn.TextColor3 = Color3.fromRGB(220,220,220)
+        Instance.new("UICorner", modeBtn).CornerRadius = UDim.new(0,6)
+
+        local saveBtn = Instance.new("TextButton", f)
+        saveBtn.Position = UDim2.new(0,324,0,6)
+        saveBtn.Size = UDim2.new(0,100,0,28)
+        saveBtn.Text = "Save"
+        saveBtn.Font = Enum.Font.GothamBold
+        saveBtn.TextSize = 14
+        saveBtn.BackgroundColor3 = Color3.fromRGB(80,0,120)
+        saveBtn.TextColor3 = Color3.fromRGB(255,255,255)
+        Instance.new("UICorner", saveBtn).CornerRadius = UDim.new(0,6)
+
+        modeBtn.MouseButton1Click:Connect(function()
+            if b.mode == "Hold" then b.mode = "Toggle" else b.mode = "Hold" end
+            modeBtn.Text = b.mode
+            saveBinds()
+        end)
+        keyBox.FocusLost:Connect(function()
+            b.key = keyBox.Text or ""
+            saveBinds()
+        end)
+        saveBtn.MouseButton1Click:Connect(function()
+            b.key = keyBox.Text or ""
+            saveBinds()
+        end)
+
+        table.insert(bindUI, {frame = f})
+        y = y + 68
+    end
+end
+
+refreshBindUI()
+
+-- -------------------------
+-- ESP Implementation (simplified: single "ESP" showing NAME | health | distance in dark red)
+-- -------------------------
+local drawingOK2, Drawing2 = pcall(function() return Drawing end)
+local useDrawing2 = drawingOK2 and Drawing2 and type(Drawing2.new) == "function"
+
+local espObjects = {}
+
+local function createESP(plr)
+    if not plr or plr == lp then return end
+    if espObjects[plr] then return end
+    if useDrawing2 then
+        local txt = Drawing2.new("Text")
+        txt.Visible = false
+        txt.Center = true
+        txt.Size = 14
+        txt.Color = DARK_RED
+        txt.Outline = true
+        espObjects[plr] = { text = txt }
+    else
+        if not plr.Character or not plr.Character:FindFirstChild("Head") then return end
+        local adornPart = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
+        local gui = Instance.new("BillboardGui")
+        gui.Name = "IMHUB_ESP"
+        gui.Adornee = adornPart
+        gui.Size = UDim2.new(0,200,0,40)
+        gui.AlwaysOnTop = true
+        gui.Parent = adornPart
+        local label = Instance.new("TextLabel", gui)
+        label.Size = UDim2.new(1,0,1,0)
+        label.BackgroundTransparency = 1
+        label.TextColor3 = DARK_RED
+        label.Font = Enum.Font.GothamBold
+        label.TextSize = 14
+        label.TextStrokeTransparency = 0.7
+        espObjects[plr] = { gui = gui, label = label }
+    end
+end
+
+local function removeESP(plr)
+    if not espObjects[plr] then return end
+    if useDrawing2 then
+        pcall(function()
+            if espObjects[plr].text then espObjects[plr].text:Remove() end
+        end)
+    else
+        pcall(function() if espObjects[plr].gui then espObjects[plr].gui:Destroy() end end)
+    end
+    espObjects[plr] = nil
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        if state.espEnabled then task.wait(0.05); createESP(plr) end
+    end)
+end)
+Players.PlayerRemoving:Connect(function(plr) removeESP(plr) end)
+
+-- -------------------------
+-- No-Recoil (kept simple)
+-- -------------------------
+local lastCF = Camera and Camera.CFrame or CFrame.new()
+RunService.RenderStepped:Connect(function() if Camera then lastCF = Camera.CFrame end end)
+local recoilAlpha = 0.95
+RunService.Heartbeat:Connect(function()
+    if state.noRecoilEnabled and Camera and lastCF then Camera.CFrame = Camera.CFrame:Lerp(lastCF, recoilAlpha) end
+end)
+
+-- -------------------------
+-- AIMBOT CORE
+-- -------------------------
+local drawingOK, Drawing = pcall(function() return Drawing end)
+local useDrawing = drawingOK and Drawing and type(Drawing.new) == "function"
+local aimCircle = nil
+local function createOrUpdateAimCircle()
+    if not useDrawing then return end
+    if not aimCircle then
+        aimCircle = Drawing.new("Circle")
+        aimCircle.Thickness = 2; aimCircle.NumSides = 64; aimCircle.Visible = false; aimCircle.Filled = false; aimCircle.Transparency = 0.6; aimCircle.ZIndex = 1
+    end
+    if not Camera then return end
+    local cx, cy = Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2
+    aimCircle.Radius = math.max(1, state.AimFOV or 1)
+    aimCircle.Position = Vector2.new(cx, cy)
+    aimCircle.Color = Color3.fromRGB(0,200,255)
+    aimCircle.Visible = state.aimFOVEnabled
+end
+
+-- GUI-based circle (sized using state.AimFOV)
+local fovGui = Instance.new("ScreenGui", CoreGui)
+fovGui.Name = "IMHUB_V4_AIMFOV_GUI"
+fovGui.IgnoreGuiInset = true
+fovGui.Enabled = state.aimFOVEnabled
+local fovCircle = Instance.new("Frame", fovGui)
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.Position = UDim2.new(0.5,0,0.5,0)
+fovCircle.BackgroundTransparency = 1
+local uiStroke = Instance.new("UIStroke", fovCircle); uiStroke.Thickness = 2; uiStroke.Color = Color3.fromRGB(0,0,0)
+local uiCorner = Instance.new("UICorner", fovCircle); uiCorner.CornerRadius = UDim.new(1,0)
+local function UpdateFOV()
+    if not fovGui or not fovCircle or not Camera then return end
+    fovGui.Enabled = state.aimFOVEnabled
+    local size = math.max(2, (state.AimFOV or 1) * 2)
+    fovCircle.Size = UDim2.fromOffset(size, size)
+    fovCircle.Position = UDim2.new(0.5,0,0.5,0)
+end
+UpdateFOV()
+
+-- helper: preferred part by priority
+local function GetPriorityPart(character)
+    if not character then return nil end
+    if state.priority == "Head" then
+        return character:FindFirstChild("Head") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
+    else
+        return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("Head")
+    end
+end
+
+-- screen distance (pixels) from screen center
+local function screenDist(worldPos)
+    if not Camera then return math.huge, Vector2.new(0,0) end
+    local p, onScreen = Camera:WorldToViewportPoint(worldPos)
+    if not onScreen then return math.huge, Vector2.new(0,0) end
+    local v = Vector2.new(p.X, p.Y)
+    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    return (v - center).Magnitude, v
+end
+
+-- inside FOV check using center-of-screen pixel radius (state.AimFOV)
+local function IsInsideFOV(screenPos)
+    if not Camera or not screenPos then return false end
+    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+    if state.Smoothing <= 3 then
+        return dist <= (state.AimFOV or 0)
+    else
+        return dist <= ((state.AimFOV or 0) + (state.Smoothing * 8))
+    end
+end
+
+-- get targets respecting team check and health
+local function getTargets()
+    local t = {}
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr ~= lp and plr.Character and plr.Character.Parent and plr.Character:FindFirstChildOfClass("Humanoid") then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                if not (state.teamCheck and lp.Team and plr.Team and lp.Team == plr.Team) then
+                    table.insert(t, plr)
+                end
+            end
+        end
+    end
+    return t
+end
+
+-- pick target: now strictly respects AimFOV pixels when enabled
+local function pickTarget()
+    local best, bestDist = nil, math.huge
+    local targets = getTargets()
+    for _,plr in ipairs(targets) do
+        local part = GetPriorityPart(plr.Character)
+        if part then
+            local d, scr = screenDist(part.Position)
+            if state.aimFOVEnabled then
+                if scr and IsInsideFOV(scr) and d < bestDist then
+                    bestDist = d
+                    best = plr
+                end
+            else
+                if d < bestDist then
+                    bestDist = d
+                    best = plr
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- Humanizer jitter (applied to screen pixel coords)
+local function ApplyHumanizer(vec2)
+    if not state.humanizer then return vec2 end
+    local s = state.humanizerStrength or 0.6
+    local rx = (math.random() - 0.5) * s * 2
+    local ry = (math.random() - 0.5) * s * 2
+    return vec2 + Vector2.new(rx, ry)
+end
+
+-- Apply smoothing logic (Legit vs Rage) - aims camera towards world target pos
+local function ApplySmooth(camera, targetPos)
+    if not camera or not targetPos then return end
+    local smooth = state.Smoothing or 2
+    if state.legitAssist then
+        smooth = math.min(smooth, 3)
+    end
+    if smooth <= 3 then
+        local lerpAmount = 0.035 * smooth
+        camera.CFrame = camera.CFrame:Lerp(CFrame.new(camera.CFrame.Position, targetPos), lerpAmount)
+    else
+        local power = 0.25 + (smooth * 0.12)
+        if state.rageBoost then power = math.clamp(power + 0.15, 0, 1) end
+        camera.CFrame = camera.CFrame:Lerp(CFrame.new(camera.CFrame.Position, targetPos), math.clamp(power, 0, 1))
+    end
+end
+
+-- Silent aim helper (keeps previous behavior)
+local function SilentAimApply(targetCharacter)
+    if not state.silentAim or not targetCharacter then return nil end
+    return GetPriorityPart(targetCharacter)
+end
+
+-- Psilent now uses a configurable strength:
+-- Explanation:
+--  - state.psilentStrength: user value 1..600 (UI). We map it to a lerp alpha between 0.01 and 1.0:
+--      alpha = clamp(psilentStrength / 600, 0.01, 1.0)
+--  - Small values -> very gradual orientation of HRP toward the target (discreet)
+--  - Large values -> fast/snap alignment (use with cautela)
+--  - This only adjusts HumanoidRootPart orientation (não muda a câmera do jogador)
+local function ApplyPSilent(targetPos)
+    if not state.psilent or not targetPos then return end
+    if not lp or not lp.Character then return end
+    local hrp = lp.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    pcall(function()
+        local dir = (targetPos - hrp.Position)
+        if dir.Magnitude > 0 then
+            -- compute alpha from user value (1..600)
+            local strength = math.clamp(tonumber(state.psilentStrength) or 60, 1, 600)
+            local alpha = math.clamp(strength / 600, 0.01, 1.0)
+            -- build desired look CFrame and lerp HRP orientation toward it
+            local desired = CFrame.new(hrp.Position, hrp.Position + dir.Unit)
+            hrp.CFrame = hrp.CFrame:Lerp(desired, alpha)
+        end
+    end)
+end
+
+-- New helper: return list of players within AimFOV (respects team/health)
+local function playersInFOVList()
+    local list = {}
+    if not Camera then return list end
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr ~= lp and plr.Character and plr.Character.Parent and plr.Character:FindFirstChildOfClass("Humanoid") then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                if not (state.teamCheck and lp.Team and plr.Team and lp.Team == plr.Team) then
+                    local part = GetPriorityPart(plr.Character)
+                    if part then
+                        local d, scr = screenDist(part.Position)
+                        if scr and IsInsideFOV(scr) then
+                            table.insert(list, plr)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return list
+end
+
+-- New helper: aim at a given target (applies humanizer, smoothing, psilent)
+local function AimAt(target)
+    if not target or not target.Character or not Camera then return end
+    -- choose part to aim at (SilentAim prioritized if enabled)
+    local aimPart = SilentAimApply(target.Character) or GetPriorityPart(target.Character)
+    if not aimPart then aimPart = target.Character:FindFirstChild("Head") or target.Character:FindFirstChild("HumanoidRootPart") end
+    if aimPart then
+        local worldPos = aimPart.Position
+        local screenPoint, onScreen = Camera:WorldToViewportPoint(worldPos)
+        if onScreen then
+            local aimVec2 = Vector2.new(screenPoint.X, screenPoint.Y)
+            aimVec2 = ApplyHumanizer(aimVec2)
+
+            -- apply psilent alignment (body) using configured strength
+            ApplyPSilent(worldPos)
+
+            -- enforce AimFOV here: only aim if inside FOV (when enabled)
+            if (state.aimFOVEnabled and IsInsideFOV(Vector2.new(screenPoint.X, screenPoint.Y))) or not state.aimFOVEnabled then
+                -- compute world lookAt
+                if state.silentAim then
+                    pcall(function()
+                        local orig = Camera.CFrame
+                        Camera.CFrame = CFrame.new(orig.Position, worldPos)
+                        task.spawn(function()
+                            task.wait(0.03)
+                            pcall(function() Camera.CFrame = orig end)
+                        end)
+                    end)
+                else
+                    ApplySmooth(Camera, worldPos)
+                end
+            end
+        end
+    end
+end
+
+-- CamLock helper (keeps nearest on-screen target centered)
+local camLockPickTarget = nil
+local function updateCamLockTarget()
+    if not state.camLockActive then camLockPickTarget = nil; return end
+    if not Camera then return end
+    local viewport = Camera.ViewportSize
+    local center = Vector2.new(viewport.X/2, viewport.Y/2)
+    local closest, smallest = nil, math.huge
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr ~= lp and plr.Character and plr.Character:FindFirstChild("Head") then
+            local pos, onScreen = Camera:WorldToViewportPoint(plr.Character.Head.Position)
+            if onScreen then
+                local dist = (center - Vector2.new(pos.X,pos.Y)).Magnitude
+                if dist < smallest then smallest = dist; closest = plr end
+            end
+        end
+    end
+    camLockPickTarget = closest
+end
+
+-- -------------------------
+-- NEW: ESP WALL CHECK implementation
+-- -------------------------
+local espWallObjects = {} -- per-player drawing/gui objects
+
+local function createWallESP(plr)
+    if not plr or plr == lp then return end
+    if espWallObjects[plr] then return end
+    if useDrawing2 then
+        local line = Drawing2.new("Line")
+        line.Visible = false
+        line.Thickness = 2
+        line.Color = WHITE
+
+        local box = Drawing2.new("Square")
+        box.Visible = false
+        box.Filled = false
+        box.Thickness = 2
+        box.Color = DARK_RED
+        -- default visible size
+        box.Size = Vector2.new(48, 64)
+
+        local info = Drawing2.new("Text")
+        info.Visible = false
+        info.Size = 14
+        info.Color = LIGHT_RED
+        info.Center = true
+        info.Outline = true
+
+        espWallObjects[plr] = {
+            line = line,
+            box = box,
+            info = info
+        }
+    else
+        -- Fallback: use BillboardGui for box + TextLabel for info; no line in fallback.
+        if not plr.Character then return end
+        local adornee = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
+        if not adornee then return end
+        local gui = Instance.new("BillboardGui")
+        gui.Name = "IMHUB_WALLCHECK"
+        gui.Adornee = adornee
+        gui.Size = UDim2.new(0, 90, 0, 50) -- default smaller
+        gui.AlwaysOnTop = true
+        gui.StudsOffset = Vector3.new(0, 1.6, 0)
+        gui.Parent = adornee or plr.Character:FindFirstChildWhichIsA("BasePart") or workspace
+
+        local boxLabel = Instance.new("Frame", gui)
+        boxLabel.BackgroundTransparency = 0.5
+        boxLabel.Size = UDim2.new(1,0,1,0)
+        boxLabel.BackgroundColor3 = DARK_RED
+        boxLabel.BorderSizePixel = 0
+        boxLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+        boxLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
+
+        local infoLabel = Instance.new("TextLabel", gui)
+        infoLabel.Size = UDim2.new(1,0,0,18)
+        infoLabel.Position = UDim2.new(0,0,1,0)
+        infoLabel.BackgroundTransparency = 1
+        infoLabel.TextColor3 = LIGHT_RED
+        infoLabel.Font = Enum.Font.GothamBold
+        infoLabel.TextSize = 14
+        infoLabel.Visible = false
+        infoLabel.TextStrokeTransparency = 0.7
+
+        espWallObjects[plr] = {
+            gui = gui,
+            boxFrame = boxLabel,
+            infoLabel = infoLabel
+        }
+    end
+end
+
+local function removeWallESP(plr)
+    if not espWallObjects[plr] then return end
+    local obj = espWallObjects[plr]
+    if useDrawing2 then
+        pcall(function() if obj.line then obj.line:Remove() end end)
+        pcall(function() if obj.box then obj.box:Remove() end end)
+        pcall(function() if obj.info then obj.info:Remove() end end)
+    else
+        pcall(function() if obj.gui then obj.gui:Destroy() end end)
+    end
+    espWallObjects[plr] = nil
+end
+
+Players.PlayerRemoving:Connect(function(plr) removeWallESP(plr) end)
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        if state.espWallCheckEnabled then task.wait(0.05); createWallESP(plr) end
+    end)
+end)
+
+-- helper for visibility: raycast from camera to target part and check if hit belongs to target character
+local function isVisibleToCamera(targetPart, targetCharacter)
+    if not Camera or not targetPart or not targetCharacter then return false end
+    local origin = Camera.CFrame.Position
+    local direction = (targetPart.Position - origin)
+    if direction.Magnitude <= 0 then return true end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    -- ignore local player's character so it doesn't block view
+    if lp and lp.Character then
+        rayParams.FilterDescendantsInstances = { lp.Character }
+    else
+        rayParams.FilterDescendantsInstances = {}
+    end
+    local ray = workspace:Raycast(origin, direction, rayParams)
+    if not ray then
+        -- nothing hit => treat as not visible (conservative)
+        return false
+    end
+    local hitInst = ray.Instance
+    if hitInst and hitInst:IsDescendantOf(targetCharacter) then
+        return true
+    end
+    return false
+end
+
+-- utility: robustly get player's display name or name
+local function getPlayerNameSafe(plr)
+    if not plr then return "Player" end
+    local name = nil
+    pcall(function()
+        if plr.DisplayName and tostring(plr.DisplayName) ~= "" then
+            name = tostring(plr.DisplayName)
+        elseif plr.Name and tostring(plr.Name) ~= "" then
+            name = tostring(plr.Name)
+        end
+    end)
+    return name or "Player"
+end
+
+-- update function called each frame
+local function updateESPWallCheck()
+    if not Camera then return end
+    -- ensure objects exist
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr ~= lp and plr.Character and plr.Character.Parent and plr.Character:FindFirstChildOfClass("Humanoid") then
+            createWallESP(plr)
+        else
+            removeWallESP(plr)
+        end
+    end
+
+    -- start position world (below local player)
+    local startWorld = nil
+    if lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
+        startWorld = lp.Character.HumanoidRootPart.Position + Vector3.new(0, -3, 0)
+    elseif lp and lp.Character and lp.Character:FindFirstChild("Head") then
+        startWorld = lp.Character.Head.Position + Vector3.new(0, -3, 0)
+    end
+
+    for plr,obj in pairs(espWallObjects) do
+        if not plr or not plr.Character or not plr.Character.Parent then
+            removeWallESP(plr)
+        else
+            local part = GetPriorityPart(plr.Character) or plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
+            if part and Camera then
+                local scrPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                local startScr = nil
+                if startWorld then
+                    local sP, sOn = Camera:WorldToViewportPoint(startWorld)
+                    startScr = sP
+                end
+                local distance = 0
+                if lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") and part then
+                    distance = (lp.Character.HumanoidRootPart.Position - part.Position).Magnitude
+                end
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                local health = hum and math.max(0, math.floor(hum.Health)) or 0
+                local nameStr = getPlayerNameSafe(plr)
+                local distStr = string.format("%.1f", distance)
+
+                -- Determine visibility via raycast
+                local visible = isVisibleToCamera(part, plr.Character)
+
+                if useDrawing2 and obj.line and obj.box and obj.info then
+                    if onScreen then
+                        local target2d = Vector2.new(scrPos.X, scrPos.Y)
+                        -- SHOW INFO BOTH WHEN VISIBLE E OCLUIDO
+                        if visible and startScr and startScr.Z > 0 then
+                            -- visible: show line + dark box, show info (white)
+                            obj.line.Visible = true
+                            obj.line.From = Vector2.new(startScr.X, startScr.Y)
+                            obj.line.To = target2d
+                            obj.line.Color = WHITE
+
+                            obj.box.Visible = true
+                            -- use larger box when visible
+                            local visibleSize = Vector2.new(48, 64)
+                            obj.box.Size = visibleSize
+                            obj.box.Position = Vector2.new(target2d.X - visibleSize.X/2, target2d.Y - visibleSize.Y/2)
+                            obj.box.Color = DARK_RED
+
+                            obj.info.Visible = true
+                            obj.info.Text = tostring(nameStr) .. " | " .. tostring(health) .. " | " .. distStr .. "m"
+                            -- position info slightly above the box
+                            obj.info.Position = Vector2.new(target2d.X, target2d.Y - (visibleSize.Y/2) - 12)
+                            obj.info.Color = WHITE
+                        else
+                            -- occluded: hide line, show smaller box light red and info text (red)
+                            obj.line.Visible = false
+
+                            obj.box.Visible = true
+                            local occludedSize = Vector2.new(28, 36) -- smaller size for occluded
+                            obj.box.Size = occludedSize
+                            obj.box.Position = Vector2.new(target2d.X - occludedSize.X/2, target2d.Y - occludedSize.Y/2)
+                            obj.box.Color = LIGHT_RED
+
+                            obj.info.Visible = true
+                            obj.info.Text = tostring(nameStr) .. " | " .. tostring(health) .. " | " .. distStr .. "m"
+                            obj.info.Position = Vector2.new(target2d.X, target2d.Y - (occludedSize.Y/2) - 10)
+                            obj.info.Color = LIGHT_RED
+                        end
+                    else
+                        -- off-screen: hide all
+                        obj.line.Visible = false
+                        obj.box.Visible = false
+                        obj.info.Visible = false
+                    end
+                else
+                    -- Fallback (BillboardGui)
+                    if obj.gui then
+                        -- Only show the gui when the player exists; change color + size based on visibility
+                        if onScreen then
+                            if visible then
+                                if obj.boxFrame then
+                                    obj.boxFrame.BackgroundColor3 = DARK_RED
+                                    obj.infoLabel.Visible = true
+                                    obj.infoLabel.Text = tostring(nameStr) .. " | " .. tostring(health) .. " | " .. distStr .. "m"
+                                    obj.infoLabel.TextColor3 = WHITE
+                                    -- visible: larger gui
+                                    if obj.gui then
+                                        obj.gui.Size = UDim2.new(0, 90, 0, 50)
+                                        obj.gui.StudsOffset = Vector3.new(0, 1.6, 0)
+                                    end
+                                end
+                            else
+                                if obj.boxFrame then
+                                    obj.boxFrame.BackgroundColor3 = LIGHT_RED
+                                    obj.infoLabel.Visible = true
+                                    obj.infoLabel.Text = tostring(nameStr) .. " | " .. tostring(health) .. " | " .. distStr .. "m"
+                                    obj.infoLabel.TextColor3 = LIGHT_RED
+                                    -- occluded: smaller gui to reduce box size visual
+                                    if obj.gui then
+                                        obj.gui.Size = UDim2.new(0, 60, 0, 36)
+                                        obj.gui.StudsOffset = Vector3.new(0, 1.2, 0)
+                                    end
+                                end
+                            end
+                            obj.gui.Enabled = true
+                        else
+                            -- off-screen
+                            if obj.gui then obj.gui.Enabled = false end
+                        end
+                    end
+                end
+            else
+                -- no valid part
+                if useDrawing2 and obj.line and obj.box and obj.info then
+                    obj.line.Visible = false
+                    obj.box.Visible = false
+                    obj.info.Visible = false
+                elseif obj.gui then
+                    obj.gui.Enabled = false
+                end
+            end
+        end
+    end
+end
+
+-- -------------------------
+-- Main RenderStepped loop
+-- -------------------------
+RunService.RenderStepped:Connect(function()
+    -- update visual FOVs
+    UpdateFOV()
+    createOrUpdateAimCircle()
+
+    -- camera lock
+    if state.camLockActive then
+        if camLockPickTarget and camLockPickTarget.Character and camLockPickTarget.Character:FindFirstChild("Head") and Camera then
+            local headPos = camLockPickTarget.Character.Head.Position
+            local camPos = Camera.CFrame.Position
+            Camera.CFrame = CFrame.new(camPos, headPos)
+        else
+            updateCamLockTarget()
+        end
+    end
+
+    -- speed & noclip
+    if lp and lp.Character and lp.Character:FindFirstChildOfClass("Humanoid") then
+        local hum = lp.Character:FindFirstChildOfClass("Humanoid")
+        hum.WalkSpeed = state.speedEnabled and state.speedValue or 16
+        for _,part in pairs(lp.Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if state.noclipEnabled then
+                    part.CanCollide = false
+                else
+                    part.CanCollide = true
+                end
+            end
+        end
+    end
+
+    -- Jump handling
+    if (jumpActive) and lp and lp.Character and lp.Character:FindFirstChildOfClass("Humanoid") then
+        local hum = lp.Character:FindFirstChildOfClass("Humanoid")
+        hum.UseJumpPower = true
+        hum.JumpPower = state.jumpValue
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+
+    -- ESP update & nearby count
+    if state.espEnabled then
+        local nearby = 0
+        if lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
+            for _,plr in pairs(Players:GetPlayers()) do
+                if plr ~= lp and plr.Character and plr.Character:FindFirstChildOfClass("Humanoid") then
+                    local hrp = plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character:FindFirstChild("Head")
+                    if hrp then
+                        local dist = (lp.Character.HumanoidRootPart.Position - hrp.Position).Magnitude
+                        if dist <= 50 then nearby = nearby + 1 end
+                    end
+                end
+            end
+        end
+        nearbyLabel.Text = "Nearby players: "..tostring(nearby)
+
+        -- ensure ESP objects exist and update their text
+        for _,plr in pairs(Players:GetPlayers()) do
+            if plr ~= lp and plr.Character and plr.Character.Parent and plr.Character:FindFirstChildOfClass("Humanoid") then
+                createESP(plr)
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                local hrp = plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character:FindFirstChild("Head")
+                local health = hum and math.max(0, math.floor(hum.Health)) or 0
+                local dist = 0
+                if lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") and hrp then
+                    dist = (lp.Character.HumanoidRootPart.Position - hrp.Position).Magnitude
+                end
+                local distStr = string.format("%.1f", dist)
+                local nameStr = getPlayerNameSafe(plr)
+
+                if useDrawing2 then
+                    local txtObj = espObjects[plr] and espObjects[plr].text
+                    if txtObj then
+                        local onScreen = false
+                        if hrp and Camera then
+                            local p, ons = Camera:WorldToViewportPoint(hrp.Position)
+                            onScreen = ons
+                            txtObj.Position = Vector2.new(p.X, p.Y - 20)
+                        end
+                        txtObj.Visible = onScreen and state.espEnabled
+                        txtObj.Text = tostring(nameStr) .. " | " .. tostring(health) .. " | " .. distStr .. "m"
+                        txtObj.Color = DARK_RED
+                        txtObj.Size = 14
+                        txtObj.Center = true
+                    end
+                else
+                    local guiObj = espObjects[plr] and espObjects[plr].gui
+                    local label = espObjects[plr] and espObjects[plr].label
+                    if label and guiObj then
+                        label.Text = tostring(nameStr) .. " | " .. tostring(health) .. " | " .. distStr .. "m"
+                        label.TextColor3 = DARK_RED
+                        guiObj.Adornee = plr.Character:FindFirstChild("Head") or hrp
+                        guiObj.Enabled = state.espEnabled
+                    end
+                end
+            else
+                -- remove ESP for players that don't meet criteria
+                removeESP(plr)
+            end
+        end
+    else
+        -- ESP disabled: remove all ESP objects
+        for plr,_ in pairs(espObjects) do
+            removeESP(plr)
+        end
+    end
+
+    -- ESP WALL CHECK (separate opção)
+    if state.espWallCheckEnabled then
+        updateESPWallCheck()
+    else
+        -- if disabled, cleanup objects
+        for plr,_ in pairs(espWallObjects) do
+            removeWallESP(plr)
+        end
+    end
+
+    -- AIMBOT operation
+    if state.aimbotEnabled and Camera then
+        local target = pickTarget()
+        if target and target.Character and target.Character.Parent then
+            -- autoSwitch: pick nearest prioritized target each frame
+            if state.autoSwitch then
+                target = pickTarget() or target
+            end
+
+            -- choose part to aim at (SilentAim prioritized if enabled)
+            local aimPart = SilentAimApply(target.Character) or GetPriorityPart(target.Character)
+            if not aimPart then aimPart = target.Character:FindFirstChild("Head") or target.Character:FindFirstChild("HumanoidRootPart") end
+
+            if aimPart then
+                local worldPos = aimPart.Position
+                local screenPoint, onScreen = Camera:WorldToViewportPoint(worldPos)
+                if onScreen then
+                    local aimVec2 = Vector2.new(screenPoint.X, screenPoint.Y)
+                    aimVec2 = ApplyHumanizer(aimVec2)
+
+                    -- Psilent: apply body alignment using configured strength
+                    ApplyPSilent(worldPos)
+
+                    -- enforce AimFOV here: only aim if inside FOV (when enabled)
+                    if (state.aimFOVEnabled and IsInsideFOV(Vector2.new(screenPoint.X, screenPoint.Y))) or not state.aimFOVEnabled then
+                        -- compute world lookAt and apply smoothing to camera or silent aim behavior
+                        if state.silentAim then
+                            -- temporary camera aim (invisible to user) to allow "silent" aiming for shots
+                            pcall(function()
+                                local orig = Camera.CFrame
+                                Camera.CFrame = CFrame.new(orig.Position, worldPos)
+                                task.spawn(function()
+                                    task.wait(0.03)
+                                    pcall(function() Camera.CFrame = orig end)
+                                end)
+                            end)
+                        else
+                            ApplySmooth(Camera, worldPos)
+                        end
+                    end
+                end
+            end
+        end
+    elseif state.aimFOVEnabled and Camera then
+        -- New behavior: if Aimbot is OFF but AimFOV is ON, auto-aim at any player inside the circle
+        local inside = playersInFOVList()
+        if #inside > 0 then
+            -- pick closest to center among those inside
+            local best, bestDist = nil, math.huge
+            for _,plr in ipairs(inside) do
+                local part = GetPriorityPart(plr.Character)
+                if part then
+                    local d, scr = screenDist(part.Position)
+                    if d < bestDist then bestDist = d; best = plr end
+                end
+            end
+            if best then
+                AimAt(best)
+            end
+        end
+    end
+end)
+
+-- -------------------------
+-- Bind handling (kept but updates visual labels)
+-- -------------------------
+local holdStates = {}
+local toggleStates = {}
+local actionMap = {
+    Aimbot = function(val) state.aimbotEnabled = val; aimToggle.BackgroundColor3 = val and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40); aimToggle.Text = "Aimbot: "..(val and "ON" or "OFF") end,
+    CameraLock = function(val) state.camLockActive = val; camLockToggle.BackgroundColor3 = val and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40); camLockToggle.Text = "CameraLock: "..(val and "ON" or "OFF") end,
+    Jump = function(val) jumpActive = val; jumpToggle.BackgroundColor3 = val and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40); jumpToggle.Text = "Jump Hack: "..(val and "ON" or "OFF") end,
+    Speed = function(val) state.speedEnabled = val; speedToggle.BackgroundColor3 = val and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40); speedToggle.Text = "Speed: "..(val and "ON" or "OFF") end,
+    Noclip = function(val) state.noclipEnabled = val; noclipToggle.BackgroundColor3 = val and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40); noclipToggle.Text = "Noclip: "..(val and "ON" or "OFF") end,
+    ESP = function(val) state.espEnabled = val; espToggle.BackgroundColor3 = val and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40); espToggle.Text = "ESP: "..(val and "ON" or "OFF") end,
+}
+local function triggerAction(actionName, value) if actionMap[actionName] then pcall(function() actionMap[actionName](value) end) end end
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    local s = inputToString(input)
+    for _,b in ipairs(binds) do
+        if b.key and b.key ~= "" and b.key == s then
+            if b.mode == "Hold" then holdStates[b.action] = true; triggerAction(b.action, true)
+            else toggleStates[b.action] = not toggleStates[b.action]; triggerAction(b.action, toggleStates[b.action]) end
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gp)
+    if gp then return end
+    local s = inputToString(input)
+    for _,b in ipairs(binds) do
+        if b.key and b.key ~= "" and b.key == s then
+            if b.mode == "Hold" then holdStates[b.action] = false; triggerAction(b.action, false) end
+        end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    for act,held in pairs(holdStates) do
+        if held then triggerAction(act, true) else triggerAction(act, false) end
+    end
+end)
+
+-- -------------------------
+-- Helper visuals and init
+-- -------------------------
+local function setToggleVisual(btn, bool, label)
+    if not btn then return end
+    btn.BackgroundColor3 = bool and Color3.fromRGB(0,180,0) or Color3.fromRGB(40,40,40)
+    local base = label or (btn.Text:match("^[^:]+") or btn.Text)
+    btn.Text = base .. ": " .. (bool and "ON" or "OFF")
+end
+
+-- set visuals
+setToggleVisual(speedToggle, state.speedEnabled, "Speed")
+setToggleVisual(aimToggle, state.aimbotEnabled, "Aimbot")
+setToggleVisual(teamToggle, state.teamCheck, "TeamCheck")
+setToggleVisual(aimFovToggle, state.aimFOVEnabled, "AimFOV")
+setToggleVisual(noRecoilToggle, state.noRecoilEnabled, "NO-RECOIL")
+setToggleVisual(noclipToggle, state.noclipEnabled, "Noclip")
+setToggleVisual(espToggle, state.espEnabled, "ESP")
+setToggleVisual(camLockToggle, state.camLockActive, "CameraLock")
+setToggleVisual(silentToggle, state.silentAim, "Silent Aim")
+setToggleVisual(psilentToggle, state.psilent, "Psilent")
+setToggleVisual(humanizerToggle, state.humanizer, "Humanizer")
+setToggleVisual(autoSwitchToggle, state.autoSwitch, "Auto Target Switch")
+setToggleVisual(rageBoostToggle, state.rageBoost, "Rage Boost")
+setToggleVisual(legitAssistToggle, state.legitAssist, "Legit Assist")
+setToggleVisual(espWallToggle, state.espWallCheckEnabled, "ESP WALL CHECK")
+-- priority visual already set via setPriorityToggleVisual
+
+-- initialize esp for players if enabled
+for _,plr in pairs(Players:GetPlayers()) do
+    if plr ~= lp then
+        plr.CharacterAdded:Connect(function() if state.espEnabled then task.wait(0.05); createESP(plr) end end)
+        if state.espEnabled and plr.Character then createESP(plr) end
+
+        plr.CharacterAdded:Connect(function() if state.espWallCheckEnabled then task.wait(0.05); createWallESP(plr) end end)
+        if state.espWallCheckEnabled and plr.Character then createWallESP(plr) end
+    end
+end
+
+-- save binds periodically
+game:BindToClose(function() saveBinds() end)
+task.spawn(function() while true do task.wait(10); saveBinds() end end)
+
+print("[IMHUB V4] Loaded — Psilent ajustável (1..600) ativado.")
